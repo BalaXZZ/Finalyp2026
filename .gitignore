@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.pyc
+
+# Virtual env
+venv/
+
+# Datasets
+dataset/
+yolo_dataset/
+muzzle_dataset/
+
+# Training outputs
+runs/
+
+# Model weights
+*.pth
+*.pt
+*.safetensors
+
+# IDE
+.vscode/
+
+# Docs (optional)
+*.pdf
