@@ -93,6 +93,7 @@
 # evaluate(teacher, val_loader)
 
 #-------------------------------------------------------------------------------------------------------------------
+import os
 import torch
 from torchvision.datasets import ImageFolder
 from torchvision import transforms
@@ -102,27 +103,41 @@ from torch.utils.data import DataLoader
 TRAIN_DIR = r"D:\fypdataset\muzzle_dataset\train"
 VAL_DIR = r"D:\fypdataset\muzzle_dataset\val1"
 
-# Image transformations
+# Image transformations (ViT-friendly)
+vit_mean = (0.5, 0.5, 0.5)
+vit_std = (0.5, 0.5, 0.5)
+
 train_transform = transforms.Compose([
-    transforms.Resize((224, 224)),
+    transforms.RandomResizedCrop(224, scale=(0.7, 1.0)),
     transforms.RandomHorizontalFlip(),
-    transforms.RandomRotation(15),
-    transforms.ColorJitter(brightness=0.2, contrast=0.2),
+    transforms.RandAugment(),
+    transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2),
     transforms.ToTensor(),
+    transforms.Normalize(vit_mean, vit_std),
 ])
 
 val_transform = transforms.Compose([
-    transforms.Resize((224, 224)),
+    transforms.Resize(256),
+    transforms.CenterCrop(224),
     transforms.ToTensor(),
+    transforms.Normalize(vit_mean, vit_std),
 ])
 
 # Load datasets
 train_dataset = ImageFolder(root=TRAIN_DIR, transform=train_transform)
 val_dataset = ImageFolder(root=VAL_DIR, transform=val_transform)
 
+# Keep class mapping consistent between train/val
+val_dataset.class_to_idx = train_dataset.class_to_idx
+val_dataset.classes = train_dataset.classes
+val_dataset.samples = [
+    (path, train_dataset.class_to_idx[os.path.normpath(path).split(os.sep)[-2]])
+    for path, _ in val_dataset.samples
+]
+
 # Data loaders
-train_loader = DataLoader(train_dataset, batch_size=16, shuffle=True)
-val_loader = DataLoader(val_dataset, batch_size=16, shuffle=False)
+train_loader = DataLoader(train_dataset, batch_size=16, shuffle=True, num_workers=4, pin_memory=True)
+val_loader = DataLoader(val_dataset, batch_size=16, shuffle=False, num_workers=4, pin_memory=True)
 
 # Info
 num_classes = len(train_dataset.classes)
@@ -138,8 +153,8 @@ teacher = models.resnet18(pretrained=True)
 teacher.fc = nn.Linear(teacher.fc.in_features, num_classes)
 teacher = teacher.to(device)
 
-criterion = nn.CrossEntropyLoss()
-optimizer = torch.optim.Adam(teacher.parameters(), lr=1e-4)
+criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
+optimizer = torch.optim.AdamW(teacher.parameters(), lr=1e-4, weight_decay=0.01)
 def train_teacher(model, loader, epochs=10):
     model.train()
     for epoch in range(epochs):
@@ -167,14 +182,16 @@ student = timm.create_model(
     num_classes=num_classes
 ).to(device)
 
-student_optimizer = torch.optim.Adam(student.parameters(), lr=3e-4)
-def distillation_loss(student_logits, teacher_logits, labels, alpha=0.5, T=4):
+student_optimizer = torch.optim.AdamW(student.parameters(), lr=3e-4, weight_decay=0.05)
+student_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(student_optimizer, T_max=15)
+
+def distillation_loss(student_logits, teacher_logits, labels, alpha=0.7, T=4):
     hard_loss = criterion(student_logits, labels)
     soft_loss = nn.KLDivLoss(reduction="batchmean")(
         torch.log_softmax(student_logits / T, dim=1),
         torch.softmax(teacher_logits / T, dim=1)
     )
-    return alpha * hard_loss + (1 - alpha) * soft_loss
+    return alpha * hard_loss + (1 - alpha) * (T * T) * soft_loss
 def train_student(student, teacher, loader, epochs=15):
     teacher.eval()
     student.train()
@@ -196,6 +213,7 @@ def train_student(student, teacher, loader, epochs=15):
 
             total_loss += loss.item()
 
+        student_scheduler.step()
         print(f"Student Epoch [{epoch+1}/{epochs}] Loss: {total_loss:.4f}")
 
 train_student(student, teacher, train_loader)
@@ -223,6 +241,4 @@ def evaluate(model, loader):
     print(f"Accuracy: {acc:.2f}%")
 
 evaluate(student, val_loader)
-
-
 
